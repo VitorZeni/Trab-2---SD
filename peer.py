@@ -74,7 +74,7 @@ class Peer:
                     print(f"[{self.name}] ERRO: Não foi possível encontrar {peer_name}.")
         print("-" * 30)
     
-    # Lógica de entrar na seção crítica foi movida para um método próprio
+    # Lógica para entrar na seção crítica
     def enter_critical_section(self):
         """Ações a serem tomadas ao ganhar acesso ao recurso."""
         with self.lock:
@@ -172,7 +172,7 @@ class Peer:
                 if peer_name in self.active_peers:
                     self._send_message_to_peer(peer_name, 'receive_reply', self.name)
     
-    # ### NOVO ### Método para a CLI
+    # Método para a CLI
     def list_active_peers(self):
         print("\n--- Peers Ativos ---")
         if not self.active_peers:
