@@ -81,15 +81,15 @@ class Peer:
             
             print(f"\n==============================================")
             print(f"[{self.name}] ACESSO CONCEDIDO À SEÇÃO CRÍTICA!")
+            print(f"    -> Estado atual: {self.state}") ### ADICIONADO ###
             print(f"    -> O recurso será liberado automaticamente em {RESOURCE_ACCESS_TIME} segundos.")
             print(f"==============================================\n")
             
             self.resource_timer = threading.Timer(RESOURCE_ACCESS_TIME, self.auto_release_resource)
             self.resource_timer.start()
 
-    # Passa um flag para a função release_resource
     def auto_release_resource(self):
-        print(f"\n[{self.name}] TEMPO ESGOTADO! Liberando o recurso automaticamente.")
+        print(f"\n[{self.name}] TEMPO ESGOTADO! Liberando o recurso!!!")
         self.release_resource(is_auto=True)
 
     def _send_message_to_peer(self, peer_name, method_name, *args):
@@ -106,6 +106,7 @@ class Peer:
                 print(f"[{self.name}] Acesso já solicitado ou obtido. Estado atual: {self.state}")
                 return
             self.state = STATE_WANTED
+            print(f"[{self.name}] Estado alterado para: {self.state}") ### ADICIONADO ###
             self.logical_clock += 1
             self.our_timestamp = self.logical_clock
             self.replies_received.clear()
@@ -123,7 +124,7 @@ class Peer:
 
         for name in active_peers_snapshot:
             threading.Thread(target=self._send_message_to_peer, 
-                             args=(name, 'receive_request', self.our_timestamp, self.name)).start()
+                            args=(name, 'receive_request', self.our_timestamp, self.name)).start()
         
         self.wait_for_replies()
 
@@ -152,10 +153,8 @@ class Peer:
             self.state = STATE_HELD
             self.enter_critical_section()
 
-    #  Lógica refeita para não segurar o lock durante o I/O
     def release_resource(self, is_auto=False):
         peers_to_reply = []
-        
         with self.lock:
             if self.state != STATE_HELD:
                 print(f"\n[{self.name}] Você não possui o recurso para liberar.")
@@ -167,15 +166,13 @@ class Peer:
                     print(f"\n[{self.name}] Liberação manual. Timer de expiração cancelado.")
 
             self.state = STATE_RELEASED
+            print(f"[{self.name}] Estado alterado para: {self.state}") ### ADICIONADO ###
             self.our_timestamp = -1
             
-            # Pega a lista de peers para responder, mas não envia as mensagens aqui
             while self.request_queue:
                 _timestamp, peer_name = self.request_queue.popleft()
                 if peer_name in self.active_peers:
                     peers_to_reply.append(peer_name)
-        
-        # O LOCK É LIBERADO AQUI, antes de qualquer operação de rede
         
         if peers_to_reply:
             print(f"[{self.name}] Recurso liberado. Respondendo à fila de espera.")
@@ -201,17 +198,13 @@ class Peer:
         with self.lock:
             self.logical_clock = max(self.logical_clock, timestamp) + 1
             has_priority = (timestamp, peer_name) < (self.our_timestamp, self.name)
+
             if self.state == STATE_HELD or (self.state == STATE_WANTED and not has_priority):
                 self.request_queue.append((timestamp, peer_name))
+                print(f"[{self.name}] Pedido de {peer_name} enfileirado.") # Log para depuração
             else:
                 if peer_name in self.active_peers:
-                    # A resposta é enviada fora do lock para consistência
-                    peers_to_reply = [peer_name]
-                else:
-                    peers_to_reply = []
-        
-        for name in peers_to_reply:
-            self._send_message_to_peer(name, 'receive_reply', self.name)
+                    self._send_message_to_peer(peer_name, 'receive_reply', self.name)
 
     @Pyro5.api.oneway
     def receive_reply(self, peer_name):
