@@ -181,7 +181,6 @@ class Peer:
         else:
             print(f"[{self.name}] Recurso liberado.")
 
-
     def list_active_peers(self):
         print("\n--- Peers Ativos ---")
         with self.lock:
@@ -199,9 +198,9 @@ class Peer:
             self.logical_clock = max(self.logical_clock, timestamp) + 1
             has_priority = (timestamp, peer_name) < (self.our_timestamp, self.name)
 
-            if self.state == STATE_HELD or (self.state == STATE_WANTED and not has_priority):
+            if self.state == STATE_HELD or (self.state == STATE_WANTED and has_priority):
                 self.request_queue.append((timestamp, peer_name))
-                print(f"[{self.name}] Pedido de {peer_name} enfileirado.") # Log para depuração
+                print(f"[{self.name}] Pedido de {peer_name} enfileirado.")
             else:
                 if peer_name in self.active_peers:
                     self._send_message_to_peer(peer_name, 'receive_reply', self.name)
