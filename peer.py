@@ -52,8 +52,8 @@ class Peer:
         self.active_peers = set()
         self.last_heartbeat = {}
         
-        # Timer para liberação automática do recurso
         self.resource_timer = None
+        self.all_replies_event = threading.Event()
 
         print(f"[{self.name}] Peer inicializado. Estado: {self.state}")
 
@@ -74,9 +74,7 @@ class Peer:
                     print(f"[{self.name}] ERRO: Não foi possível encontrar {peer_name}.")
         print("-" * 30)
     
-    # Lógica para entrar na seção crítica
     def enter_critical_section(self):
-        """Ações a serem tomadas ao ganhar acesso ao recurso."""
         with self.lock:
             if self.state != STATE_HELD:
                 return
@@ -86,22 +84,20 @@ class Peer:
             print(f"    -> O recurso será liberado automaticamente em {RESOURCE_ACCESS_TIME} segundos.")
             print(f"==============================================\n")
             
-            # Inicia o timer para liberar o recurso automaticamente
             self.resource_timer = threading.Timer(RESOURCE_ACCESS_TIME, self.auto_release_resource)
             self.resource_timer.start()
 
+    # ### CORREÇÃO ### Passa um flag para a função release_resource
     def auto_release_resource(self):
-        """Função chamada pelo timer para liberar o recurso."""
         print(f"\n[{self.name}] TEMPO ESGOTADO! Liberando o recurso automaticamente.")
-        self.release_resource()
+        self.release_resource(is_auto=True)
 
     def _send_message_to_peer(self, peer_name, method_name, *args):
         try:
             uri = self.peer_uris[peer_name]
             with Pyro5.api.Proxy(uri) as proxy:
                 getattr(proxy, method_name)(*args)
-        except (KeyError, Pyro5.errors.CommunicationError, Pyro5.errors.NamingError) as e:
-            print(f"[{self.name}] Falha de comunicação com {peer_name} ao chamar '{method_name}': {e}")
+        except (KeyError, Pyro5.errors.CommunicationError, Pyro5.errors.NamingError):
             self.handle_failed_peer(peer_name)
 
     def request_resource(self):
@@ -113,9 +109,12 @@ class Peer:
             self.logical_clock += 1
             self.our_timestamp = self.logical_clock
             self.replies_received.clear()
+            self.all_replies_event.clear()
             print(f"[{self.name}] Requisitando recurso com timestamp {self.our_timestamp}.")
         
-        active_peers_snapshot = list(self.active_peers)
+        with self.lock:
+            active_peers_snapshot = list(self.active_peers)
+
         if not active_peers_snapshot:
             print(f"[{self.name}] Nenhum outro peer ativo. Acesso concedido imediatamente.")
             self.state = STATE_HELD
@@ -129,56 +128,71 @@ class Peer:
         self.wait_for_replies()
 
     def wait_for_replies(self):
-        start_time = time.time()
-        while time.time() - start_time < REQUEST_TIMEOUT:
+        with self.lock:
+            num_peers_to_wait_for = len(self.active_peers)
+        print(f"[{self.name}] Aguardando respostas de {num_peers_to_wait_for} peers...")
+        
+        event_is_set = self.all_replies_event.wait(timeout=REQUEST_TIMEOUT)
+
+        if not event_is_set:
+            print(f"[{self.name}] Timeout! Verificando peers que não responderam...")
             with self.lock:
+                non_responsive_peers = self.active_peers - self.replies_received
+                for peer_name in list(non_responsive_peers):
+                    print(f"[{self.name}] Peer {peer_name} não respondeu a tempo.")
+                    self.handle_failed_peer(peer_name, check_replies=False)
+                
                 if self.replies_received == self.active_peers:
                     self.state = STATE_HELD
                     self.enter_critical_section()
-                    return
-            time.sleep(0.1)
+                else:
+                    print(f"[{self.name}] Não foi possível obter acesso. Retornando ao estado RELEASED.")
+                    self.state = STATE_RELEASED
+        else:
+            self.state = STATE_HELD
+            self.enter_critical_section()
+
+    # ### CORREÇÃO ### Lógica refeita para não segurar o lock durante o I/O
+    def release_resource(self, is_auto=False):
+        peers_to_reply = []
         
-        print(f"[{self.name}] Timeout! Verificando peers que não responderam...")
-        with self.lock:
-            non_responsive_peers = self.active_peers - self.replies_received
-            for peer_name in list(non_responsive_peers):
-                print(f"[{self.name}] Peer {peer_name} não respondeu a tempo.")
-                self.handle_failed_peer(peer_name)
-            
-            if self.replies_received == self.active_peers:
-                self.state = STATE_HELD
-                self.enter_critical_section()
-                return
-
-            print(f"[{self.name}] Não foi possível obter acesso. Retornando ao estado RELEASED.")
-            self.state = STATE_RELEASED
-
-    def release_resource(self):
         with self.lock:
             if self.state != STATE_HELD:
                 print(f"\n[{self.name}] Você não possui o recurso para liberar.")
                 return
-            
-            # ### NOVO ### Cancela o timer se a liberação for manual
-            if self.resource_timer and self.resource_timer.is_alive():
-                self.resource_timer.cancel()
-                print(f"\n[{self.name}] Liberação manual. Timer de expiração cancelado.")
+
+            if not is_auto:
+                if self.resource_timer and self.resource_timer.is_alive():
+                    self.resource_timer.cancel()
+                    print(f"\n[{self.name}] Liberação manual. Timer de expiração cancelado.")
 
             self.state = STATE_RELEASED
             self.our_timestamp = -1
-            print(f"[{self.name}] Recurso liberado. Respondendo à fila de espera.")
+            
+            # Pega a lista de peers para responder, mas não envia as mensagens aqui
             while self.request_queue:
                 _timestamp, peer_name = self.request_queue.popleft()
                 if peer_name in self.active_peers:
-                    self._send_message_to_peer(peer_name, 'receive_reply', self.name)
-    
-    # Método para a CLI
+                    peers_to_reply.append(peer_name)
+        
+        # O LOCK É LIBERADO AQUI, antes de qualquer operação de rede
+        
+        if peers_to_reply:
+            print(f"[{self.name}] Recurso liberado. Respondendo à fila de espera.")
+            for peer_name in peers_to_reply:
+                self._send_message_to_peer(peer_name, 'receive_reply', self.name)
+        else:
+            print(f"[{self.name}] Recurso liberado.")
+
+
     def list_active_peers(self):
         print("\n--- Peers Ativos ---")
-        if not self.active_peers:
+        with self.lock:
+            active_peers = list(self.active_peers)
+        if not active_peers:
             print("Nenhum outro peer ativo no momento.")
         else:
-            for peer_name in sorted(list(self.active_peers)):
+            for peer_name in sorted(active_peers):
                 print(f"- {peer_name}")
         print("--------------------")
 
@@ -186,31 +200,37 @@ class Peer:
     def receive_request(self, timestamp, peer_name):
         with self.lock:
             self.logical_clock = max(self.logical_clock, timestamp) + 1
-            # print(f"[{self.name}] Recebeu requisição de {peer_name} com ts {timestamp}.") # Log pode ser muito verboso
-            
             has_priority = (timestamp, peer_name) < (self.our_timestamp, self.name)
             if self.state == STATE_HELD or (self.state == STATE_WANTED and not has_priority):
                 self.request_queue.append((timestamp, peer_name))
             else:
                 if peer_name in self.active_peers:
-                    self._send_message_to_peer(peer_name, 'receive_reply', self.name)
+                    # A resposta é enviada fora do lock para consistência
+                    peers_to_reply = [peer_name]
+                else:
+                    peers_to_reply = []
+        
+        for name in peers_to_reply:
+            self._send_message_to_peer(name, 'receive_reply', self.name)
 
     @Pyro5.api.oneway
     def receive_reply(self, peer_name):
         with self.lock:
             if self.state == STATE_WANTED:
                 self.replies_received.add(peer_name)
+                if self.replies_received == self.active_peers:
+                    self.all_replies_event.set()
     
     @Pyro5.api.oneway
     def receive_heartbeat(self, peer_name):
         with self.lock:
-            if peer_name in self.active_peers:
-                self.last_heartbeat[peer_name] = time.time()
+            self.last_heartbeat[peer_name] = time.time()
 
     def send_heartbeats(self):
         while True:
             time.sleep(HEARTBEAT_INTERVAL)
-            active_peers_snapshot = list(self.active_peers)
+            with self.lock:
+                active_peers_snapshot = list(self.active_peers)
             for name in active_peers_snapshot:
                 self._send_message_to_peer(name, 'receive_heartbeat', self.name)
     
@@ -226,7 +246,7 @@ class Peer:
                 print(f"\n[{self.name}] Timeout de heartbeat de {name}.")
                 self.handle_failed_peer(name)
     
-    def handle_failed_peer(self, peer_name):
+    def handle_failed_peer(self, peer_name, check_replies=True):
         with self.lock:
             if peer_name in self.active_peers:
                 print(f"[{self.name}] REMOVENDO peer inativo: {peer_name}")
@@ -234,6 +254,10 @@ class Peer:
                 self.peer_uris.pop(peer_name, None)
                 self.last_heartbeat.pop(peer_name, None)
                 self.request_queue = deque([(ts, name) for ts, name in self.request_queue if name != peer_name])
+                
+                if check_replies and self.state == STATE_WANTED:
+                    if self.replies_received == self.active_peers:
+                        self.all_replies_event.set()
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in PEER_NAMES:
@@ -270,8 +294,7 @@ def main():
             choice = input("Escolha uma opção: ")
 
             if choice == '1':
-                # Roda a requisição em uma thread para não bloquear o menu
-                threading.Thread(target=peer.request_resource).start()
+                peer.request_resource()
             elif choice == '2':
                 peer.release_resource()
             elif choice == '3':
