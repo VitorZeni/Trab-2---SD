@@ -87,7 +87,7 @@ class Peer:
             self.resource_timer = threading.Timer(RESOURCE_ACCESS_TIME, self.auto_release_resource)
             self.resource_timer.start()
 
-    # ### CORREÇÃO ### Passa um flag para a função release_resource
+    # Passa um flag para a função release_resource
     def auto_release_resource(self):
         print(f"\n[{self.name}] TEMPO ESGOTADO! Liberando o recurso automaticamente.")
         self.release_resource(is_auto=True)
@@ -152,7 +152,7 @@ class Peer:
             self.state = STATE_HELD
             self.enter_critical_section()
 
-    # ### CORREÇÃO ### Lógica refeita para não segurar o lock durante o I/O
+    #  Lógica refeita para não segurar o lock durante o I/O
     def release_resource(self, is_auto=False):
         peers_to_reply = []
         
