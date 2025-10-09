@@ -81,7 +81,7 @@ class Peer:
             
             print(f"\n==============================================")
             print(f"[{self.name}] ACESSO CONCEDIDO À SEÇÃO CRÍTICA!")
-            print(f"    -> Estado atual: {self.state}") ### ADICIONADO ###
+            print(f"    -> Estado atual: {self.state}")
             print(f"    -> O recurso será liberado automaticamente em {RESOURCE_ACCESS_TIME} segundos.")
             print(f"==============================================\n")
             
@@ -106,7 +106,7 @@ class Peer:
                 print(f"[{self.name}] Acesso já solicitado ou obtido. Estado atual: {self.state}")
                 return
             self.state = STATE_WANTED
-            print(f"[{self.name}] Estado alterado para: {self.state}") ### ADICIONADO ###
+            print(f"[{self.name}] Estado alterado para: {self.state}")
             self.logical_clock += 1
             self.our_timestamp = self.logical_clock
             self.replies_received.clear()
@@ -166,7 +166,7 @@ class Peer:
                     print(f"\n[{self.name}] Liberação manual. Timer de expiração cancelado.")
 
             self.state = STATE_RELEASED
-            print(f"[{self.name}] Estado alterado para: {self.state}") ### ADICIONADO ###
+            print(f"[{self.name}] Estado alterado para: {self.state}")
             self.our_timestamp = -1
             
             while self.request_queue:
