@@ -27,14 +27,7 @@ STATE_RELEASED = "RELEASED"
 STATE_WANTED = "WANTED"
 STATE_HELD = "HELD"
 
-def start_name_server():
-    try:
-        Pyro5.api.locate_ns()
-        print("Servidor de Nomes do PyRO já está em execução.")
-    except Pyro5.errors.NamingError:
-        print("Iniciando o Servidor de Nomes do PyRO...")
-        subprocess.Popen("pyro5-ns", shell=True)
-        time.sleep(1)
+# O servidor é iniciado com pyro5-ns
 
 @Pyro5.api.expose
 @Pyro5.api.behavior(instance_mode="single")
@@ -45,7 +38,7 @@ class Peer:
         self.state = STATE_RELEASED
         self.logical_clock = 0
         self.request_queue = deque()
-        self.our_timestamp = -1
+        self.timestamp = -1
         self.replies_received = set()
         self.lock = threading.Lock()
         
@@ -58,40 +51,30 @@ class Peer:
         print(f"[{self.name}] Peer inicializado. Estado: {self.state}")
 
     def discover_peers(self):
-        print(f"[{self.name}] Procurando por outros peers...")
+        print(f"[{self.name}] Procurando por outros peers... (Aguardando todos se registrarem)")
         ns = Pyro5.api.locate_ns()
-        time.sleep(2)
         
-        for peer_name in PEER_NAMES:
-            if peer_name != self.name:
-                try:
-                    peer_uri = ns.lookup(peer_name)
-                    self.peer_uris[peer_name] = peer_uri
-                    self.active_peers.add(peer_name)
-                    self.last_heartbeat[peer_name] = time.time()
-                    print(f"[{self.name}] Encontrou {peer_name}.")
-                except Pyro5.errors.NamingError:
-                    print(f"[{self.name}] ERRO: Não foi possível encontrar {peer_name}.")
+        peers_to_find = [p for p in PEER_NAMES if p != self.name]
+        
+        while len(self.peer_uris) < len(peers_to_find):
+            for peer_name in peers_to_find:
+                if peer_name not in self.peer_uris:
+                    try:
+                        peer_uri = ns.lookup(peer_name)
+                        self.peer_uris[peer_name] = peer_uri
+                        self.active_peers.add(peer_name)
+                        self.last_heartbeat[peer_name] = time.time()
+                        print(f"[{self.name}] Encontrou {peer_name}.")
+                    except Pyro5.errors.NamingError:
+                        pass
+            
+            if len(self.peer_uris) < len(peers_to_find):
+                print(f"[{self.name}] Ainda aguardando {len(peers_to_find) - len(self.peer_uris)} peer(s). Nova tentativa em 2s...")
+                time.sleep(2)
+        
+        print(f"[{self.name}] Todos os peers foram encontrados!")
         print("-" * 30)
     
-    def enter_critical_section(self):
-        with self.lock:
-            if self.state != STATE_HELD:
-                return
-            
-            print(f"\n==============================================")
-            print(f"[{self.name}] ACESSO CONCEDIDO À SEÇÃO CRÍTICA!")
-            print(f"    -> Estado atual: {self.state}")
-            print(f"    -> O recurso será liberado automaticamente em {RESOURCE_ACCESS_TIME} segundos.")
-            print(f"==============================================\n")
-            
-            self.resource_timer = threading.Timer(RESOURCE_ACCESS_TIME, self.auto_release_resource)
-            self.resource_timer.start()
-
-    def auto_release_resource(self):
-        print(f"\n[{self.name}] TEMPO ESGOTADO! Liberando o recurso!!!")
-        self.release_resource(is_auto=True)
-
     def _send_message_to_peer(self, peer_name, method_name, *args):
         try:
             uri = self.peer_uris[peer_name]
@@ -100,6 +83,17 @@ class Peer:
         except (KeyError, Pyro5.errors.CommunicationError, Pyro5.errors.NamingError):
             self.handle_failed_peer(peer_name)
 
+    def list_active_peers(self):
+        print("\n--- Peers Ativos ---")
+        with self.lock:
+            active_peers = list(self.active_peers)
+        if not active_peers:
+            print("Nenhum outro peer ativo no momento.")
+        else:
+            for peer_name in sorted(active_peers):
+                print(f"- {peer_name}")
+        print("--------------------")
+    
     def request_resource(self):
         with self.lock:
             if self.state != STATE_RELEASED:
@@ -108,26 +102,26 @@ class Peer:
             self.state = STATE_WANTED
             print(f"[{self.name}] Estado alterado para: {self.state}")
             self.logical_clock += 1
-            self.our_timestamp = self.logical_clock
+            self.timestamp = self.logical_clock
             self.replies_received.clear()
             self.all_replies_event.clear()
-            print(f"[{self.name}] Requisitando recurso com timestamp {self.our_timestamp}.")
+            print(f"[{self.name}] Requisitando recurso com timestamp {self.timestamp}.")
         
         with self.lock:
-            active_peers_snapshot = list(self.active_peers)
+            active_peers = list(self.active_peers)
 
-        if not active_peers_snapshot:
+        if not active_peers:
             print(f"[{self.name}] Nenhum outro peer ativo. Acesso concedido imediatamente.")
             self.state = STATE_HELD
             self.enter_critical_section()
             return
 
-        for name in active_peers_snapshot:
+        for name in active_peers:
             threading.Thread(target=self._send_message_to_peer, 
-                            args=(name, 'receive_request', self.our_timestamp, self.name)).start()
+                             args=(name, 'receive_request', self.timestamp, self.name)).start()
         
         self.wait_for_replies()
-
+    
     def wait_for_replies(self):
         with self.lock:
             num_peers_to_wait_for = len(self.active_peers)
@@ -153,6 +147,20 @@ class Peer:
             self.state = STATE_HELD
             self.enter_critical_section()
 
+    def enter_critical_section(self):
+        with self.lock:
+            if self.state != STATE_HELD:
+                return
+            
+            print(f"\n==============================================")
+            print(f"[{self.name}] ACESSO CONCEDIDO À SEÇÃO CRÍTICA!")
+            print(f"    -> Estado atual: {self.state}")
+            print(f"    -> O recurso será liberado automaticamente em {RESOURCE_ACCESS_TIME} segundos.")
+            print(f"==============================================\n")
+            
+            self.resource_timer = threading.Timer(RESOURCE_ACCESS_TIME, self.auto_release_resource)
+            self.resource_timer.start()
+
     def release_resource(self, is_auto=False):
         peers_to_reply = []
         with self.lock:
@@ -167,7 +175,7 @@ class Peer:
 
             self.state = STATE_RELEASED
             print(f"[{self.name}] Estado alterado para: {self.state}")
-            self.our_timestamp = -1
+            self.timestamp = -1
             
             while self.request_queue:
                 _timestamp, peer_name = self.request_queue.popleft()
@@ -181,24 +189,17 @@ class Peer:
         else:
             print(f"[{self.name}] Recurso liberado.")
 
-    def list_active_peers(self):
-        print("\n--- Peers Ativos ---")
-        with self.lock:
-            active_peers = list(self.active_peers)
-        if not active_peers:
-            print("Nenhum outro peer ativo no momento.")
-        else:
-            for peer_name in sorted(active_peers):
-                print(f"- {peer_name}")
-        print("--------------------")
+    def auto_release_resource(self):
+        print(f"\n[{self.name}] TEMPO ESGOTADO! Liberando o recurso automaticamente.")
+        self.release_resource(is_auto=True)
 
     @Pyro5.api.oneway
     def receive_request(self, timestamp, peer_name):
         with self.lock:
             self.logical_clock = max(self.logical_clock, timestamp) + 1
-            has_priority = (timestamp, peer_name) < (self.our_timestamp, self.name)
+            has_priority = (timestamp, peer_name) < (self.timestamp, self.name)
 
-            if self.state == STATE_HELD or (self.state == STATE_WANTED and has_priority):
+            if self.state == STATE_HELD or (self.state == STATE_WANTED and not has_priority):
                 self.request_queue.append((timestamp, peer_name))
                 print(f"[{self.name}] Pedido de {peer_name} enfileirado.")
             else:
@@ -216,14 +217,15 @@ class Peer:
     @Pyro5.api.oneway
     def receive_heartbeat(self, peer_name):
         with self.lock:
-            self.last_heartbeat[peer_name] = time.time()
+            if peer_name in self.active_peers: # Apenas atualiza se o peer for conhecido e ativo
+                self.last_heartbeat[peer_name] = time.time()
 
     def send_heartbeats(self):
         while True:
             time.sleep(HEARTBEAT_INTERVAL)
             with self.lock:
-                active_peers_snapshot = list(self.active_peers)
-            for name in active_peers_snapshot:
+                active_peers = list(self.active_peers)
+            for name in active_peers:
                 self._send_message_to_peer(name, 'receive_heartbeat', self.name)
     
     def check_heartbeats(self):
@@ -252,31 +254,57 @@ class Peer:
                         self.all_replies_event.set()
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in PEER_NAMES:
-        print(f"Uso: python {sys.argv[0]} <NomeDoPeer>")
-        print(f"Nomes válidos: {', '.join(PEER_NAMES)}")
+    # 1. Tenta localizar o Servidor de Nomes (que deve estar rodando)
+    try:
+        ns = Pyro5.api.locate_ns()
+        print("Servidor de Nomes encontrado com sucesso.")
+    except Pyro5.errors.NamingError:
+        print("ERRO: Não foi possível localizar o Servidor de Nomes do PyRO.")
+        print("Por favor, inicie o servidor em um terminal separado com o comando: pyro5-ns")
         return
-    peer_name = sys.argv[1]
-    if peer_name == PEER_NAMES[0]:
-        start_name_server()
-    else:
-        time.sleep(2)
+
+    peer_name = ""
+    # 2. Pergunta ao usuário o nome do peer
+    while True:
+        print("\n--- Inicialização do Peer ---")
+        print("Nomes de peer definidos: ", ", ".join(PEER_NAMES))
+        name_input = input("Digite o nome deste peer: ").strip()
+
+        if name_input not in PEER_NAMES:
+            print(f"Erro: Nome '{name_input}' não é válido.")
+            continue
+        
+        # 3. Verifica se o nome já está em uso
+        try:
+            ns.lookup(name_input)
+            print(f"Erro: O peer '{name_input}' já está registrado no servidor. Escolha outro nome.")
+        except Pyro5.errors.NamingError:
+            peer_name = name_input
+            break
+
+    # 4. Registra o peer
     daemon = Pyro5.api.Daemon()
     peer = Peer(peer_name)
     uri = daemon.register(peer)
-    ns = Pyro5.api.locate_ns()
     ns.register(peer_name, uri)
-    print(f"[{peer_name}] Registrado. URI: {uri}\n" + "-" * 30)
-    peer.discover_peers()
+    print(f"[{peer_name}] Registrado com sucesso. URI: {uri}\n" + "-" * 30)
+
+    # 5. Inicia o daemon em uma thread
     daemon_thread = threading.Thread(target=daemon.requestLoop, daemon=True)
     daemon_thread.start()
+
+    # 6. Inicia a descoberta
+    peer.discover_peers()
+    
+    # 7. Inicia as threads de heartbeat
     heartbeat_sender_thread = threading.Thread(target=peer.send_heartbeats, daemon=True)
     heartbeat_sender_thread.start()
     heartbeat_checker_thread = threading.Thread(target=peer.check_heartbeats, daemon=True)
     heartbeat_checker_thread.start()
+    
     print(f"[{peer_name}] Pronto e com mecanismos de tolerância a falhas ativados.\n" + "-" * 30)
     
-    # Loop da Interface de Linha de Comando (CLI)
+    # 8. Loop da CLI
     try:
         while True:
             print("\n--- Menu ---")
@@ -298,7 +326,7 @@ def main():
         print(f"\n[{peer_name}] Desligando...")
         if peer.resource_timer and peer.resource_timer.is_alive():
             peer.resource_timer.cancel()
-        ns.remove(peer_name)
+        ns.remove(peer_name) 
         daemon.shutdown()
 
 if __name__ == "__main__":
